@@ -1,110 +1,81 @@
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
+global.crypto = require('crypto');
+
+// 🛠️ Undici ReferenceError: File is not defined Fix
+if (!global.File) {
+    try {
+        global.File = require('buffer').File;
+    } catch (e) {
+        global.File = class {}; 
+    }
+}
+
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
     DisconnectReason,
     makeCacheableSignalKeyStore,
-    Browsers,
-    getContentType,
-    downloadContentFromMessage
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
-
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 const qrcode = require('qrcode-terminal');
 
-// Global Logger Instance (එකම ලොගර් එකක් පාවිච්චි කිරීමෙන් RAM ඉතුරු වේ)
 const logger = pino({ level: 'silent' });
 
-function runtime(seconds) {
-    seconds = Number(seconds);
-    var d = Math.floor(seconds / (3600 * 24)), h = Math.floor(seconds % (3600 * 24) / 3600), m = Math.floor(seconds % 3600 / 60), s = Math.floor(seconds % 60);
-    return `${d}d ${h}h ${m}m ${s}s`;
-}
-
-const PRO_IMG = "https://files.catbox.moe/fnpjhk.jpg";
-
-const downloadMedia = async (m) => {
-    const msg = m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? m.message.extendedTextMessage.contextInfo.quotedMessage : m.message;
-    if (!msg) return null;
-    const type = Object.keys(msg)[0];
-    const stream = await downloadContentFromMessage(msg[type], type.replace('Message', ''));
-    let buffer = Buffer.from([]);
-    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-    return buffer;
-};
-
 async function startBloodyRose() {
-    const { state, saveCreds } = await useMultiFileAuthState('session');
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
         version,
-        // Cacheable Key Store එක පාවිච්චි කිරීමෙන් Auth නිසා සිදුවන RAM පිරීම වැළකේ
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-        printQRInTerminal: false,
+        printQRInTerminal: false, 
         logger: logger,
-        browser: Browsers.ubuntu("Chrome"),
-
-        // ⚠️ RAM එක අඩුවෙන්ම ගන්න සෙටින්ග්ස් (Ultra Performance)
-        syncFullHistory: false,
-        shouldSyncHistoryMessage: () => false,
-        markOnlineOnConnect: false,
-        linkPreviewImageThumbnailWidth: 100, // ලින්ක් ප්‍රිවීව් වල සයිස් එක අඩු කිරීම
-        maxChatPreviews: 0, // පැරණි චැට් ලෝඩ් කිරීම වැළැක්වීම
-        emitOwnedEvents: false
+        browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    // Plugins Load කිරිම
-    const plugins = {};
-    const pluginsPath = path.join(__dirname, 'plugins');
-    if (fs.existsSync(pluginsPath)) {
-        fs.readdirSync(pluginsPath).forEach(file => {
-            if (file.endsWith('.js')) {
-                try {
-                    const plugin = require(path.join(pluginsPath, file));
-                    if (plugin.name) plugins[plugin.name] = plugin;
-                    if (plugin.alias) plugin.alias.forEach(a => plugins[a] = plugin);
-                } catch (e) {
-                    console.log(`❌ Plugin Load Error: ${file} | ${e.message}`);
-                }
-            }
-        });
-    }
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            console.log(`\n====================================`);
+            console.log(`QR LINK: https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
+            console.log(`====================================\n`);
+            qrcode.generate(qr, { small: true });
+        }
+        
+        if (connection === 'open') {
+            console.log('Bloody Rose Anime Bot Connected!');
+        }
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startBloodyRose();
+        }
+    });
 
-    // මැසේජ් හැන්ඩ්ලර් එක
-    sock.ev.on('messages.upsert', async m => {
-        if (m.type !== 'notify') return;
+    sock.ev.on('creds.update', saveCreds);
 
-        let msg = m.messages[0];
-        if (!msg || !msg.message) return;
-
-        // පැරණි මැසේජ් රන් වීම වැළැක්වීම
-        if (Math.floor(Date.now() / 1000) - msg.messageTimestamp > 60) return;
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg || !msg.message) return; // ⚠️ msg.key.fromMe බ්ලොක් එක අයින් කළා (නැත්නම් තමන්ට ටෙස්ට් කරන්න බෑ)
 
         const from = msg.key.remoteJid;
-        if (from === 'status@broadcast') return; // Status View වලදී ක්‍රියාත්මක නොවේ (RAM ඉතුරුයි)
+        
+        const rawSender = msg.key.participant || msg.key.remoteJid || '';
+        const altSender = msg.key.participantPn || msg.key.participantAlt || msg.key.remoteJidAlt || '';
 
-        const ownerNumber = "94762912642@s.whatsapp.net";
+        const senderNumberOnly = rawSender.split(':')[0].split('@')[0];
+        const altNumberOnly = altSender ? altSender.split(':')[0].split('@')[0] : '';
 
-        // 🔎 LID-safe sender resolution
-        const rawSender = msg.key.participant || msg.key.remoteJid;
-        const altSender = msg.key.participantPn || msg.key.participantAlt || msg.key.remoteJidAlt || null;
+        // 👑 Owner සහ Self Check ලොජික් එක
+        const ownerNumber = "94762912642";
+        const isOwner = msg.key.fromMe || senderNumberOnly === ownerNumber || altNumberOnly === ownerNumber;
 
-        const senderJid = rawSender.split(':')[0].split('@')[0] + '@s.whatsapp.net';
-        const senderNumberOnly = senderJid.split('@')[0];
-        const altNumberOnly = altSender ? altSender.split(':')[0].split('@')[0] : null;
-
-        // 🐞 Debug log - remove later once confirmed working
-        console.log('DEBUG sender:', { rawSender, altSender, senderNumberOnly, altNumberOnly });
-
-        const isOwner = msg.key.fromMe || senderJid === ownerNumber;
-
-        // 💉 LID Detection -> auto-react
-        const targetLidNumber = "94762912642";
-        const isLidSender = rawSender.endsWith('@lid') && altNumberOnly === targetLidNumber;
-        if (isLidSender) {
+        // 💉 LID Auto-Reaction (බොට් විසින්ම දාන මැසේජ් වලට රිඇක්ට් වීම වැළැක්වීමට !msg.key.fromMe දැම්මා)
+        const isLidSender = String(rawSender).includes(ownerNumber) || String(altSender).includes(ownerNumber);
+        
+        if (isLidSender && !msg.key.fromMe) {
             try {
                 await sock.sendMessage(from, {
                     react: {
@@ -118,51 +89,41 @@ async function startBloodyRose() {
             }
         }
 
-        const type = getContentType(msg.message);
-
-        let body = (type === 'conversation') ? msg.message.conversation :
-                   (type === 'extendedTextMessage') ? msg.message.extendedTextMessage.text :
-                   (type === 'imageMessage') ? msg.message.imageMessage.caption : '';
-
-        if (!body) return;
+        // කැප්ෂන් වලටත් වැඩ කරන්න ඔක්කොම ටෙක්ස්ට් ටයිප් ටික එකතු කලා
+        const text = msg.message.conversation || 
+                     msg.message.extendedTextMessage?.text || 
+                     msg.message.imageMessage?.caption || 
+                     msg.message.videoMessage?.caption || '';
 
         const prefix = ".";
-        const isCmd = body.startsWith(prefix);
-        const command = isCmd ? body.slice(prefix.length).trim().split(/ +/).shift().toLowerCase() : "";
-        const args = body.trim().split(/ +/).slice(1);
+        const isCmd = text.startsWith(prefix);
+        const command = isCmd ? text.slice(prefix.length).trim().split(/ +/).shift().toLowerCase() : "";
+        const args = text.trim().split(/ +/).slice(1);
 
-        if (isCmd && plugins[command]) {
-            try {
-                await plugins[command].execute(sock, msg, {
-                    ownerName: "LORD INDUMINA",
-                    isOwner,
-                    args,
-                    body,
-                    download: () => downloadMedia(msg)
-                });
-            } catch (err) {
-                console.error(err);
+        if (fs.existsSync('./plugins')) {
+            const pluginFiles = fs.readdirSync('./plugins').filter(file => file.endsWith('.js'));
+            for (const file of pluginFiles) {
+                try {
+                    const plugin = require(path.join(__dirname, 'plugins', file));
+                    
+                    // 1. ප්ලගින් එක Function එකක් නම් (පැරණි ක්‍රමය)
+                    if (typeof plugin === 'function') {
+                        if (!msg.key.fromMe || isOwner) {
+                            await plugin(sock, msg, from, text);
+                        }
+                    } 
+                    // 2. ප්ලගින් එක Object එකක් නම් (ඔයාගේ අලුත් Cartoon කෝඩ් එක වගේ)
+                    else if (plugin && typeof plugin.execute === 'function') {
+                        if (isCmd && (plugin.name === command || (plugin.alias && plugin.alias.includes(command)))) {
+                            await plugin.execute(sock, msg, { args, isCmd, body: text, from });
+                        }
+                    }
+                } catch (err) {
+                    console.error(`Error executing plugin ${file}:`, err);
+                }
             }
         }
-
-        // 🗑️ Memory එකෙන් ඉක්මනින් අයින් කරන්න (Garbage Collection Help)
-        msg = null;
-        body = null;
     });
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
-        
-        if (connection === 'open') {
-            console.log('🌹 BOT ONLINE & RAM OPTIMIZED');
-        }
-        if (connection === 'close') {
-            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) startBloodyRose();
-        }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
 }
 
 startBloodyRose();
