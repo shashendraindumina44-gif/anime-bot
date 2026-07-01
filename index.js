@@ -1,204 +1,184 @@
-const Baileys = require('@whiskeysockets/baileys');
+/**
+ * 🌹 BLOODY ROSE ANIME BOT 🌹
+ * WhatsApp Bot using @whiskeysockets/baileys
+ * Features: QR Login, Auto Plugin Loader, Auto Reconnect
+ *
+ * Setup:
+ *   npm init -y
+ *   npm install @whiskeysockets/baileys @hapi/boom pino qrcode-terminal
+ *
+ * Run:
+ *   node index.js
+ *
+ * Plugins:
+ *   Place your plugin .js files inside the "plugins" folder.
+ *   Each plugin file must export an object like:
+ *
+ *   module.exports = {
+ *     name: "ping",
+ *     command: ["ping", "p"],       // trigger words (without prefix)
+ *     description: "Bot ge speed eka check karanna",
+ *     execute: async (sock, msg, args, from) => {
+ *       await sock.sendMessage(from, { text: "🌹 Pong! Bloody Rose Anime Bot active." }, { quoted: msg });
+ *     }
+ *   };
+ */
 
 const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
-    DisconnectReason,
-    makeCacheableSignalKeyStore,
-    Browsers,
-    getContentType,
-    downloadContentFromMessage
-} = Baileys;
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+} = require("@whiskeysockets/baileys");
+const { Boom } = require("@hapi/boom");
+const pino = require("pino");
+const fs = require("fs");
+const path = require("path");
+const qrcode = require("qrcode-terminal");
 
-const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
-const qrcode = require('qrcode-terminal');
+const BOT_NAME = "🌹 BLOODY ROSE ANIME BOT 🌹";
+const PREFIX = "."; // command prefix - "." eka wenata oyata one gaanak dala ganna puluwan
+const PLUGINS_DIR = path.join(__dirname, "plugins");
 
-// Global Logger Instance (එකම ලොගර් එකක් පාවිච්චි කිරීමෙන් RAM ඉතුරු වේ)
-const logger = pino({ level: 'silent' });
+// ---------- PLUGIN LOADER ----------
+let plugins = [];
 
-function runtime(seconds) {
-    seconds = Number(seconds);
-    var d = Math.floor(seconds / (3600 * 24)), h = Math.floor(seconds % (3600 * 24) / 3600), m = Math.floor(seconds % 3600 / 60), s = Math.floor(seconds % 60);
-    return `${d}d ${h}h ${m}m ${s}s`;
+function loadPlugins() {
+  plugins = [];
+
+  if (!fs.existsSync(PLUGINS_DIR)) {
+    fs.mkdirSync(PLUGINS_DIR, { recursive: true });
+    console.log(`📁 "plugins" folder ekak hadanna widihata hadalaa thiyenne. Plugin files ehata danna.`);
+    return;
+  }
+
+  const files = fs.readdirSync(PLUGINS_DIR).filter((f) => f.endsWith(".js"));
+
+  for (const file of files) {
+    try {
+      const pluginPath = path.join(PLUGINS_DIR, file);
+      delete require.cache[require.resolve(pluginPath)]; // fresh reload support
+      const plugin = require(pluginPath);
+
+      if (plugin && plugin.command && plugin.execute) {
+        plugins.push(plugin);
+        console.log(`✅ Plugin loaded: ${plugin.name || file}`);
+      } else {
+        console.log(`⚠️  Skipped invalid plugin: ${file} (missing "command" or "execute")`);
+      }
+    } catch (err) {
+      console.log(`❌ Failed to load plugin ${file}:`, err.message);
+    }
+  }
+
+  console.log(`🌹 Total plugins loaded: ${plugins.length}`);
 }
 
-const PRO_IMG = "https://files.catbox.moe/fnpjhk.jpg";
+// ---------- START BOT ----------
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+  const { version } = await fetchLatestBaileysVersion();
 
-// 🚫 Blocked Numbers List (LORD INDUMINA)
-const blockedNumbers = ["94754933638", "94710579948", "94742349884","94788455580"];
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false, // api eka manually handle karanawa below
+    logger: pino({ level: "silent" }),
+    browser: ["Bloody Rose Anime Bot", "Chrome", "1.0.0"],
+  });
 
-const downloadMedia = async (m) => {
-    const msg = m.message?.extendedTextMessage?.contextInfo?.quotedMessage ? m.message.extendedTextMessage.contextInfo.quotedMessage : m.message;
-    if (!msg) return null;
-    const type = Object.keys(msg)[0];
-    const stream = await downloadContentFromMessage(msg[type], type.replace('Message', ''));
-    let buffer = Buffer.from([]);
-    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-    return buffer;
-};
+  // ---- Connection updates (QR code + reconnect) ----
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-async function startBloodyRose() {
-    const { state, saveCreds } = await useMultiFileAuthState('session');
-    const { version } = await fetchLatestBaileysVersion();
-
-    const sock = makeWASocket({
-        version,
-        // Cacheable Key Store එක පාවිච්චි කිරීමෙන් Auth නිසා සිදුවන RAM පිරීම වැළකේ
-        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-        printQRInTerminal: false,
-        logger: logger,
-        browser: Browsers.ubuntu("Chrome"),
-
-        // ⚠️ RAM එක අඩුවෙන්ම ගන්න සෙටින්ග්ස් (Ultra Performance)
-        syncFullHistory: false,
-        shouldSyncHistoryMessage: () => false,
-        markOnlineOnConnect: false,
-        linkPreviewImageThumbnailWidth: 100, // ලින්ක් ප්‍රිවීව් වල සයිස් එක අඩු කිරීම
-        maxChatPreviews: 0, // පැරණි චැට් ලෝඩ් කිරීම වැළැක්වීම
-        emitOwnedEvents: false
-    });
-
-    // Plugins Load කිරිම
-    const plugins = {};
-    const pluginsPath = path.join(__dirname, 'plugins');
-    if (fs.existsSync(pluginsPath)) {
-        fs.readdirSync(pluginsPath).forEach(file => {
-            if (file.endsWith('.js')) {
-                try {
-                    const plugin = require(path.join(pluginsPath, file));
-                    if (plugin.name) plugins[plugin.name] = plugin;
-                    if (plugin.alias) plugin.alias.forEach(a => plugins[a] = plugin);
-                } catch (e) {
-                    console.log(`❌ Plugin Load Error: ${file} | ${e.message}`);
-                }
-            }
-        });
+    if (qr) {
+      console.log("\n📱 Scan karanna QR code eka WhatsApp app eken (Linked Devices):\n");
+      qrcode.generate(qr, { small: true });
     }
 
-    // මැසේජ් හැන්ඩ්ලර් එක
-    sock.ev.on('messages.upsert', async m => {
-        if (m.type !== 'notify') return;
+    if (connection === "close") {
+      const shouldReconnect =
+        new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
 
-        let msg = m.messages[0];
-        if (!msg || !msg.message) return;
+      console.log("⚠️ Connection closed.", shouldReconnect ? "Reconnecting..." : "Logged out.");
 
-        // පැරණි මැසේජ් රන් වීම වැළැක්වීම
-        if (Math.floor(Date.now() / 1000) - msg.messageTimestamp > 60) return;
+      if (shouldReconnect) {
+        startBot();
+      } else {
+        console.log("❌ Session ended. auth_info folder eka delete karala apith QR scan karanna.");
+      }
+    } else if (connection === "open") {
+      console.log(`\n${BOT_NAME}\n✅ Connected successfully! Bot eka dan online.\n`);
+      loadPlugins();
+    }
+  });
 
-        const from = msg.key.remoteJid;
-        if (from === 'status@broadcast') return; // Status View වලදී ක්‍රියාත්මක නොවේ (RAM ඉතුරුයි)
+  sock.ev.on("creds.update", saveCreds);
 
-        const ownerNumber = "94762912642@s.whatsapp.net";
+  // ---- Watch plugins folder for live changes (auto reload) ----
+  fs.watch(PLUGINS_DIR, { persistent: true }, () => {
+    console.log("🔄 Plugins folder eke change ekak hamba una... reloading plugins.");
+    loadPlugins();
+  });
 
-        // 🔎 LID-safe sender resolution - WhatsApp now sometimes sends a LID
-        // instead of the real phone number in groups, so check every possible field
-        const rawSender = msg.key.participant || msg.key.remoteJid;
-        const altSender = msg.key.participantPn || msg.key.participantAlt || msg.key.remoteJidAlt || null;
+  // ---- Message handler ----
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
 
-        const senderJid = rawSender.split(':')[0].split('@')[0] + '@s.whatsapp.net';
-        const senderNumberOnly = senderJid.split('@')[0];
-        const altNumberOnly = altSender ? altSender.split(':')[0].split('@')[0] : null;
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
 
-        // 🐞 Debug log - remove later once confirmed working
-        console.log('DEBUG sender:', { rawSender, altSender, senderNumberOnly, altNumberOnly });
+    const from = msg.key.remoteJid;
 
-        const isOwner = msg.key.fromMe || senderJid === ownerNumber;
+    const body =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      "";
 
-        // 💉 LID Detection -> auto-react ONLY for this specific number's LID (works in groups & inbox)
-        const targetLidNumber = "94762912642";
-        const isLidSender = rawSender.endsWith('@lid') && altNumberOnly === targetLidNumber;
-        if (isLidSender) {
-            try {
-                await sock.sendMessage(from, {
-                    react: {
-                        text: '💉',
-                        key: msg.key
-                    }
-                });
-                console.log('💉 LID detected, reacted ->', { rawSender, altSender, from });
-            } catch (err) {
-                console.error("Error sending LID reaction:", err);
-            }
+    if (!body) return;
+
+    // Only respond to prefixed commands
+    if (!body.startsWith(PREFIX)) return;
+
+    const args = body.slice(PREFIX.length).trim().split(/\s+/);
+    const cmd = args.shift().toLowerCase();
+
+    // Built-in menu command
+    if (cmd === "menu" || cmd === "help") {
+      let menuText = `${BOT_NAME}\n\n📜 *Available Commands:*\n\n`;
+      if (plugins.length === 0) {
+        menuText += "Kisidu plugin ekak thawama load wela na. plugins folder eke .js files danna.";
+      } else {
+        for (const p of plugins) {
+          menuText += `• ${PREFIX}${p.command[0]} - ${p.description || "No description"}\n`;
         }
+      }
+      await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+      return;
+    }
 
-        const type = getContentType(msg.message);
+    // Find matching plugin
+    const plugin = plugins.find((p) => p.command.includes(cmd));
 
-        let body = (type === 'conversation') ? msg.message.conversation :
-                   (type === 'extendedTextMessage') ? msg.message.extendedTextMessage.text :
-                   (type === 'imageMessage') ? msg.message.imageMessage.caption : '';
+    if (plugin) {
+      try {
+        await plugin.execute(sock, msg, args, from);
+      } catch (err) {
+        console.log(`❌ Error running plugin "${plugin.name}":`, err.message);
+        await sock.sendMessage(
+          from,
+          { text: `⚠️ "${cmd}" command eke error ekak una. Console eka check karanna.` },
+          { quoted: msg }
+        );
+      }
+    }
+  });
 
-        if (!body) return;
-
-        const prefix = ".";
-        const isCmd = body.startsWith(prefix);
-        const command = isCmd ? body.slice(prefix.length).trim().split(/ +/).shift().toLowerCase() : "";
-        const args = body.trim().split(/ +/).slice(1);
-
-        // 🚫 Blocked Numbers Check (LORD INDUMINA) - works in groups & inbox
-        if ((blockedNumbers.includes(senderNumberOnly) || blockedNumbers.includes(altNumberOnly)) && !isOwner) {
-            if (isCmd) {
- const scaryCaption = `⚠️ *FATAL SYSTEM ERROR* ⚠️\n` +
-                     `──────────────────────────\n` +
-                     `💀 *PERMANENTLY PURGED BY LORD INDUMINA* 💀\n` +
-                     `──────────────────────────\n\n` +
-                     `🩸 *BLOODY ROSE SECURITY ENFORCEMENT*\n\n` +
-                     `\`\`\`[STATUS]  : IDENTITY_TERMINATED\n` +
-                     `[THREAT]  : CRITICAL_BREACH\n` +
-                     `[ACTION]  : ISOLATION_PROTOCOL\`\`\`\n\n` +
-                     `Your phone number has been permanently vaporized from the *Bloody Rose MD* mainframe. Do not attempt to interact. Every unauthorized packet or command you send is now being intercepted, heavily logged, and tracked.\n\n` +
-                     `🚫 *DO NOT REPLY. BACK OFF IMMEDIATELY.*`;
-                
-                try {
-                    await sock.sendMessage(from, {
-                        image: { url: "https://files.catbox.moe/altziq.jpg" },
-                        caption: scaryCaption,
-                        // 🔄 මැසේජ් එක "Forwarded many times" විදිහට පෙන්නන්න මෙතනින් පුළුවන්
-                        contextInfo: {
-                            isForwarded: true,
-                            forwardingScore: 999 // මේකෙන් WhatsApp එකේ ඊතල දෙකක් එක්ක Forwarded කියලා වැටෙනවා
-                        }
-                    }, { quoted: msg });
-                } catch (err) {
-                    console.error("Error sending block message:", err);
-                }
-            }
-            return; // ⛔ stop here, no plugin execution for blocked senders
-        }
-
-        if (isCmd && plugins[command]) {
-            try {
-                await plugins[command].execute(sock, msg, {
-                    ownerName: "LORD INDUMINA",
-                    isOwner,
-                    args,
-                    body,
-                    download: () => downloadMedia(msg)
-                });
-            } catch (err) {
-                console.error(err);
-            }
-        }
-
-        // 🗑️ Memory එකෙන් ඉක්මනින් අයින් කරන්න (Garbage Collection Help)
-        msg = null;
-        body = null;
-    });
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
-        if (connection === 'open') {
-            console.log('🌹 BOT ONLINE & RAM OPTIMIZED');
-        }
-        if (connection === 'close') {
-            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) startBloodyRose();
-        }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
+  return sock;
 }
 
-startBloodyRose();
+startBot().catch((err) => {
+  console.log("❌ Bot start karanna baa una:", err);
+});
