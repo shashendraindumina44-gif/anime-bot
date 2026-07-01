@@ -1,0 +1,23 @@
+{
+  "name": "bloody-rose-anime",
+  "version": "1.0.0",
+  "description": "Bloody Rose Anime WhatsApp Bot using Baileys",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "bloody-rose"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.5",
+    "pino": "^8.19.0",
+     "cheerio": "^1.0.0-rc.12",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
